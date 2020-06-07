@@ -1,14 +1,16 @@
-import settings
-from value_parsing import parse_value, types_len, parse_string_value, Types
+import error_factory
+import logging
+from function_adapter import Function
 from operation_parsing import parse_operation_argument
+from value_parsing import parse_value, types_len, parse_string_value, Types, parse_link
+from variable_holder import VariableId, VariableHolder
 
-
+logger=logging.getLogger("main.var_types")
 def declare(directory):
     if directory.dirlen() != 3:
-        raise ValueError(
-            f"Directory {directory.path} of type 'Declare' must have 3 subdirectories but has {directory.dirlen()}")
+        error_factory.ErrorFactory.invalid_command_dir_number([3], directory.path, directory.dirlen(), "DECLARE")
     var_directory = directory.navigate_to_nth_child(1)
-    print(f"VAR TYPES DECLARE {directory.path}")
+    logger.debug(declare.__name__+f" VAR TYPES DECLARE {directory.path}")
     name_directory = directory.navigate_to_nth_child(2)
     (var_name, value) = parse_and_validate(var_directory, name_directory, types_dict[Types(directory.get_dir_type())])
 
@@ -18,12 +20,13 @@ def declare(directory):
 
 def let(directory):
     if directory.dirlen() != 2:
-        raise ValueError(
-            f"Directory {directory.path} of type 'Let' must have 2 subdirectories varlink, value but has {directory.dirlen()}")
+        error_factory.ErrorFactory.invalid_command_dir_number([2], directory.path, directory.dirlen(), "LET")
     var_directory = directory.navigate_to_nth_child(1)
-    print(f"VAR TYPES LET {directory.path}")
-    var_link = directory.navigate_to_nth_child(0).get_link_path()
-    var_type = settings.variables[var_link][2]
+    logger.debug(let.__name__+f" VAR TYPES LET {directory.path}")
+    var_link = parse_link(directory.navigate_to_nth_child(0))
+    import function_utils
+    invoked_function = function_utils.get_currently_invoked_function()
+    var_type = invoked_function.get_var(var_link).type
     new_value = parse_value(var_directory, var_type, types_len[var_type])
     update_var_value(var_link, new_value)
 
@@ -31,35 +34,35 @@ def let(directory):
 def parse_and_validate(data_dir, name_directory, type):
     value = parse_operation_argument(data_dir)
     if value.__class__ is not type:
-        raise ValueError("Type mismatch: expected {0} got {1}".format(type, value.__class__))
+        error_factory.ErrorFactory.type_mismatch_error(type, value.__class__)
     var_name = parse_string_value([name_directory])
-    print(f"VAR TYPE {type} {var_name} = {value}")
+    if var_name.startswith('/'):
+        error_factory.ErrorFactory.restricted_variable_name_prefix(data_dir, var_name)
+    logger.debug(parse_and_validate.__name__+f" VAR TYPE {type} {var_name} = {value}")
     return var_name, value
 
 
-def get_var_names_from_vars_dict(variables):
-    return map(lambda var: var[0], list(variables.values()))
-
-
-def get_var_path_by_varname(variables, name):
-    # passing variables dict for function impl
-    return
-
-
 def attach_variable(path, name, value, clazz):
-    if path in settings.variables or name in get_var_names_from_vars_dict(settings.variables):
-        raise ValueError(f"Variable {name} already defined")
+    import function_utils
+    invoked_function = function_utils.get_currently_invoked_function()
+    variable_id = VariableId(path, name)
+    variable_value = VariableHolder(clazz, value)
+    if invoked_function.variable_stack.check_if_var_exists_by_path(
+            path) or invoked_function.variable_stack.check_if_var_exists_by_name(name):
+        error_factory.ErrorFactory.var_already_defined_error(name)
     else:
-        settings.variables[path] = (name, value, clazz)
+        invoked_function.variable_stack.create_var(variable_id, variable_value)
 
 
 def update_var_value(path, value):
-    if path not in settings.variables:
-        raise ValueError(f"Variable at {path} not defined")
+    import function_utils
+    invoked_function = function_utils.get_currently_invoked_function()
+    if not invoked_function.variable_stack.check_if_var_exists_by_path(
+            path):
+        error_factory.ErrorFactory.var_not_defined_error(path)
     else:
-        var_properties = list(settings.variables[path])
-        var_properties[1] = value
-        settings.variables[path] = tuple(var_properties)
+        var_value = invoked_function.variable_stack.get_var_by_path(path)
+        var_value.value = value
 
 
 types_dict = {
@@ -69,7 +72,8 @@ types_dict = {
     Types.string: str,
     Types.boolean: bool,
     Types.list: list,
-    Types.dict: dict
+    Types.dict: dict,
+    Types.function: Function
 }
 
 

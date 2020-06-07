@@ -1,12 +1,18 @@
 import math
+import os
+import logging
 from enum import Enum
 
+import error_factory
 from directory_functions import Directory
-from operation_parsing import operation_parsing, parse_operation_argument
+from function_adapter import Function
+from operation_parsing import parse_operation_argument, operation_parsing
 from operations import ArithmeticOperation, ComparisonOperation, StringOperation
 
+logger = logging.getLogger("main.value_parsing")
 
 class Types(Enum):
+    function = 0
     int = 1
     float = 2
     char = 3
@@ -22,11 +28,11 @@ def parse_generic_value(data_dir, type_class, basic_type_length):
     if data_dir.dirlen() == basic_type_length:
         return parsing_function([data_dir, True])
     else:
-        raise ValueError(f"Could not parse value at {data_dir.path}")
+        error_factory.ErrorFactory.unparsable_expression(data_dir.path)
 
 
 def parse_value(data_dir, type_class, basic_type_length):
-    print(f"VAR TYPES Parsing declare value of type {type_class}")
+    logger.info(parse_value.__name__ + f" VAR TYPES Parsing declare value of type {type_class}")
 
     parsing_function = parsing_dict[type_class]
 
@@ -37,8 +43,8 @@ def parse_value(data_dir, type_class, basic_type_length):
         return operation_parsing(data_dir)
 
     else:
-        raise ValueError(
-            types_errors_dict[type_class].format(data_dir.parent_path.path, basic_type_length, data_dir.path))
+        error_factory.ErrorFactory.unparsable_value(data_dir.parent_path.path, basic_type_length, data_dir.path,
+                                                    type_class)
 
 
 def parse_integer_value(parsing_int_data):
@@ -77,9 +83,7 @@ def parse_string_value(parsing_string_data):
     string_array = []
     for char_dir in chars_dir.navigate_to_nth_child(0).get_directory_children():
         if char_dir.dirlen() != 8:
-            raise ValueError(
-                f"First subdirectory of directory {char_dir.path} of type 'declare char' must have 8 subdirectories "
-                f"ASCII (0-127) but has {char_dir.dirlen()}")
+            error_factory.ErrorFactory.unparsable_value(char_dir.parent_path.path, 8, char_dir.path, Types.char)
         string_array.append(chr(parse_integer_value([char_dir, False])))
     return "".join(string_array)
 
@@ -104,10 +108,56 @@ def parse_dict_value(parsing_dict_data):
     _dict = {}
     for pair in vals_dir.navigate_to_nth_child(0).get_directory_children():
         if pair.dirlen() != 2:
-            raise ValueError(
-                f"Invalid number of dirs {pair.path} Each entry in dictionary must have 2 dirs, {pair.dirlen()} given")
-        _dict[parse_operation_argument(pair.navigate_to_nth_child(0))] = parse_operation_argument(pair.navigate_to_nth_child(1))
+            error_factory.ErrorFactory.directory_parsing_error(pair.path, pair.dirlen())
+        _dict[parse_operation_argument(pair.navigate_to_nth_child(0))] = parse_operation_argument(
+            pair.navigate_to_nth_child(1))
     return _dict
+
+
+def define_function(parsing_func_data):
+    commands_root = parsing_func_data[0].navigate_to_nth_child(0).path
+
+    fun_name = parse_and_validate_only_value(parsing_func_data[0].parent_path.navigate_to_nth_child(2), str)
+    args_list = parse_list_value([parsing_func_data[0].navigate_to_nth_child(1)])
+
+    if any(arg.__class__ is not str for arg in args_list):
+        error_factory.ErrorFactory.invalid_argument_name()
+    elif len(set(args_list)) != len(args_list):
+        error_factory.ErrorFactory.duplicate_arg_name(fun_name)
+    if parsing_func_data[0].navigate_to_nth_child(2).dirlen() != 0:
+        return_val_id = parse_and_validate_only_value(parsing_func_data[0].navigate_to_nth_child(2), str)
+    else:
+        return_val_id = None
+    if len(args_list) < 0:
+        error_factory.ErrorFactory.invalid_function_args_no(len(args_list))
+
+    logger.info(define_function.__name__ + " FUNCTION DEFINED TO " + commands_root + " " + fun_name + " " + str(args_list))
+    return Function(commands_root, fun_name, args_list, return_val_id)
+
+
+def parse_and_validate_only_value(data_dir, type):
+    value = parse_operation_argument(data_dir)
+    if value.__class__ is not type:
+        error_factory.ErrorFactory.type_mismatch_error(type, value.__class__)
+    logger.debug(parse_and_validate_only_value.__name__ + f" VAR TYPE {type} = {value}")
+    return value
+
+
+def parse_link(self):
+    if self.dirlen() == 1:
+        logger.debug(parse_link.__name__ + " LINK")
+        return (os.readlink(self.navigate_to_nth_child(0).path), os.readlink(self.navigate_to_nth_child(0).path)[:-1])[
+            os.readlink(self.navigate_to_nth_child(0).path).endswith('/')]
+    elif self.dirlen() == 3:
+        logger.debug(parse_link.__name__ + " NAME")
+        str_dirs = list(filter(lambda it_dir: not os.path.islink(it_dir.path), self.get_directory_children()))
+        return parse_string_value([Directory(children=str_dirs)])
+    else:
+        error_factory.ErrorFactory.command_not_found(self.path, self.dirlen())
+
+
+def match_type(value):
+    return python_types_dict[value.__class__]
 
 
 parsing_dict = {
@@ -117,27 +167,15 @@ parsing_dict = {
     Types.string: parse_string_value,
     Types.boolean: parse_boolean_value,
     Types.list: parse_list_value,
-    Types.dict: parse_dict_value
-}
-
-types_errors_dict = {
-    Types.int: "Either first subdirectory of directory {0} of type 'declare int' must have {1} subdirectories or "
-               "operation returning int value at level {2} expected",
-    Types.float: "Either first subdirectory of directory {0} of type 'declare float' must have {1} subdirectories or "
-                 "operation returning float value at level {2} expected",
-    Types.char: "Either first subdirectory of directory {0} of type 'declare char' must have 8 subdirectories or "
-                "operation returning char value at level {2} expected",
-    Types.string: "Either data subdir of directory {0} of type 'declare string' must have 8 subdirectories or "
-                  "operation returning string value at level {2} expected",
-    Types.boolean: "Either first subdirectory of directory {0} of type 'declare boolean' must have 0-1 subdirectories "
-                   "or operation returning boolean value at level {2} expected"
+    Types.dict: parse_dict_value,
+    Types.function: define_function
 }
 
 types_operations_dict = {ArithmeticOperation: [Types.int, Types.float],
                          ComparisonOperation: [Types.int, Types.float, Types.string, Types.char, Types.boolean],
                          StringOperation: [Types.string, Types.char]}
+# NONE TYPE CAN HAS LENGTH 3 or 6 (operation / function)!!!
 
-# NONE TYPE CAN HAS LENGTH 3!!!
 types_len = {
     Types.int: 16,
     Types.float: 32,
@@ -145,7 +183,8 @@ types_len = {
     Types.string: 2,
     Types.list: 4,
     Types.dict: 5,
-    Types.boolean: 1
+    Types.boolean: 1,
+    Types.function: 6
 }
 
 len_types = {
@@ -155,5 +194,16 @@ len_types = {
     1: Types.boolean,
     4: Types.list,
     5: Types.dict,
-    2: Types.string
+    2: Types.string,
+    6: Types.function
+}
+
+python_types_dict = {
+    int: Types.int,
+    float: Types.float,
+    str: Types.string,
+    bool: Types.boolean,
+    list: Types.list,
+    dict: Types.dict,
+    Function: Types.function
 }
